@@ -1,0 +1,10 @@
+playwright
+bs4
+pandas
+pymysql
+datetime
+dotenv
+openpyxl
+mysql-connector-python
+rich
+cryptography
