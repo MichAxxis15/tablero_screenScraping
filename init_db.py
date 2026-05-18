@@ -561,5 +561,77 @@ def initialize_database():
             cursor.close()
             connexion.close()
 
+def crear_vista_resumen():
+    """Crea (o reemplaza) la vista v_resumen_punto_venta en la base de datos."""
+    try:
+        connexion = mysql.connector.connect(
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
+            database=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            auth_plugin='mysql_native_password'
+        )
+
+        if connexion.is_connected():
+            cursor = connexion.cursor()
+
+            vista_sql = """
+            CREATE OR REPLACE VIEW v_resumen_punto_venta AS
+            WITH Totales_Globales AS (
+                SELECT
+                    SUM(total) AS gran_total_ventas,
+                    SUM(costo_total) AS gran_total_costos,
+                    SUM(utilidad) AS gran_total_utilidad
+                FROM ventas
+            ),
+            Detalle_Puntos_Venta AS (
+                SELECT
+                    pv.nombre AS punto_venta,
+                    SUM(v.total) AS ventas,
+                    SUM(v.costo_total) AS costos,
+                    SUM(v.utilidad) AS utilidad_bruta
+                FROM ventas v
+                JOIN puntos_venta pv ON v.punto_venta_id = pv.id
+                GROUP BY pv.nombre
+            )
+            SELECT
+                d.punto_venta AS punto_de_venta,
+                d.ventas AS ventas,
+                ROUND((d.ventas / t.gran_total_ventas) * 100, 2) AS pct_ventas,
+                d.costos AS costos,
+                ROUND((d.costos / t.gran_total_costos) * 100, 2) AS pct_costos,
+                d.utilidad_bruta AS ut_bruta,
+                ROUND((d.utilidad_bruta / t.gran_total_utilidad) * 100, 2) AS pct_ut_bruta,
+                ROUND((d.utilidad_bruta / d.ventas) * 100, 2) AS margen_pct
+            FROM Detalle_Puntos_Venta d
+            CROSS JOIN Totales_Globales t
+
+            UNION ALL
+
+            SELECT
+                'Total',
+                t.gran_total_ventas,
+                100.00,
+                t.gran_total_costos,
+                100.00,
+                t.gran_total_utilidad,
+                100.00,
+                ROUND((t.gran_total_utilidad / t.gran_total_ventas) * 100, 2)
+            FROM Totales_Globales t
+            """
+
+            cursor.execute(vista_sql)
+            connexion.commit()
+            print("Vista v_resumen_punto_venta creada/actualizada con éxito.")
+
+    except Error as e:
+        print(f"Error al crear la vista: {e}")
+    finally:
+        if 'connexion' in locals() and connexion.is_connected():
+            cursor.close()
+            connexion.close()
+
+
 if __name__ == '__main__':
     initialize_database()
