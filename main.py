@@ -4,7 +4,7 @@ import logging
 from rich.logging import RichHandler
 from rich.console import Console
 
-from init_db import initialize_database
+from init_db import initialize_database, crear_vista_resumen
 import articulos
 import carga
 import ventas_res
@@ -41,6 +41,11 @@ def execute_pipeline():
         with console.status("[yellow]Ejecutando scraper de ventas...", spinner="dots"):
             ventas_res.main()
         logging.info("[green]✅ Proceso de ventas finalizado.[/green]\n")
+
+        console.rule("[bold blue]PASO 5: Creando Vista de Resumen por Punto de Venta[/bold blue]")
+        with console.status("[yellow]Generando vista v_resumen_punto_venta...", spinner="dots"):
+            crear_vista_resumen()
+        logging.info("[green]✅ Vista de resumen creada.[/green]\n")
 
         console.rule("[bold green]🚀 PIPELINE COMPLETADO CON ÉXITO[/bold green]")
 

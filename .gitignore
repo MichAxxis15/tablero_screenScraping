@@ -4,3 +4,4 @@ bocetos/
 reportes/
 
 config.env
+__pycache__/
