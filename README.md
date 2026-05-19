@@ -11,7 +11,7 @@ Sistema automatizado de extracción de datos desde el ERP DATUM (datumparaiso.co
 - [Estructura del Excel de Recetas](#estructura-del-excel-de-recetas)
 - [Descripción de Módulos](#descripción-de-módulos)
 - [Ejecución del Pipeline](#ejecución-del-pipeline)
-- [Catálogos y Datos iniciales](#catalogos-y-datos-iniciales)
+- [Catálogos y Datos iniciales](#catalogos-y-datos-inaiciales)
 - [Integración con Jaspersoft Studio](#integración-con-jaspersoft-studio)
 - [Solución de Problemas Comunes](#solución-de-problemas-comunes)
 - [Consideraciones de Mantenimiento](#consideraciones-de-mantenimiento)

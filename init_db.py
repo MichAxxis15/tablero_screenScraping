@@ -562,7 +562,7 @@ def initialize_database():
             connexion.close()
 
 def crear_vista_resumen():
-    """Crea (o reemplaza) la vista v_resumen_punto_venta en la base de datos."""
+    """Crea (o reemplaza) las vistas de resumen para reportes."""
     try:
         connexion = mysql.connector.connect(
             host=os.getenv("DB_HOST"),
@@ -622,8 +622,54 @@ def crear_vista_resumen():
             """
 
             cursor.execute(vista_sql)
+
+            vista_mensual_sql = """
+            CREATE OR REPLACE VIEW v_resumen_mensual_punto_venta AS
+            WITH Totales_Mensuales AS (
+                SELECT
+                    DATE_FORMAT(periodo_inicio, '%Y-%m-01') AS periodo_mes,
+                    SUM(total) AS gran_total_ventas,
+                    SUM(costo_total) AS gran_total_costos,
+                    SUM(utilidad) AS gran_total_utilidad
+                FROM ventas
+                GROUP BY DATE_FORMAT(periodo_inicio, '%Y-%m-01')
+            ),
+            Detalle_Mensual_Puntos_Venta AS (
+                SELECT
+                    DATE_FORMAT(v.periodo_inicio, '%Y-%m-01') AS periodo_mes,
+                    YEAR(v.periodo_inicio) AS anio,
+                    MONTH(v.periodo_inicio) AS mes_numero,
+                    pv.nombre AS punto_venta,
+                    SUM(v.total) AS ventas,
+                    SUM(v.costo_total) AS costos,
+                    SUM(v.utilidad) AS utilidad_bruta
+                FROM ventas v
+                JOIN puntos_venta pv ON v.punto_venta_id = pv.id
+                GROUP BY
+                    DATE_FORMAT(v.periodo_inicio, '%Y-%m-01'),
+                    YEAR(v.periodo_inicio),
+                    MONTH(v.periodo_inicio),
+                    pv.nombre
+            )
+            SELECT
+                STR_TO_DATE(d.periodo_mes, '%Y-%m-%d') AS periodo_mes,
+                d.anio AS anio,
+                d.mes_numero AS mes_numero,
+                d.punto_venta AS punto_de_venta,
+                d.ventas AS ventas,
+                ROUND((d.ventas / NULLIF(t.gran_total_ventas, 0)) * 100, 2) AS pct_ventas_mes,
+                d.costos AS costos,
+                ROUND((d.costos / NULLIF(t.gran_total_costos, 0)) * 100, 2) AS pct_costos_mes,
+                d.utilidad_bruta AS ut_bruta,
+                ROUND((d.utilidad_bruta / NULLIF(t.gran_total_utilidad, 0)) * 100, 2) AS pct_ut_bruta_mes,
+                ROUND((d.utilidad_bruta / NULLIF(d.ventas, 0)) * 100, 2) AS margen_pct
+            FROM Detalle_Mensual_Puntos_Venta d
+            JOIN Totales_Mensuales t ON t.periodo_mes = d.periodo_mes
+            """
+
+            cursor.execute(vista_mensual_sql)
             connexion.commit()
-            print("Vista v_resumen_punto_venta creada/actualizada con éxito.")
+            print("Vistas v_resumen_punto_venta y v_resumen_mensual_punto_venta creadas/actualizadas con exito.")
 
     except Error as e:
         print(f"Error al crear la vista: {e}")

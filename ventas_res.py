@@ -268,7 +268,10 @@ def insertar_batch(cur, venta_id, items, pv_id):
             continue
 
         if not platillo or not tipo_id:
-            no_encontrados.append(item)
+            no_encontrados.append({
+                **item,
+                "tipo_producto_id": tipo_id
+            })
             continue
 
         key = (platillo["id"], tipo_id)
@@ -349,7 +352,7 @@ def insertar_batch(cur, venta_id, items, pv_id):
         ne_values.append((
             venta_id,
             item["producto"],
-            None,
+            item["tipo_producto_id"],
             item["cantidad"],
             item["total"],
             0,
@@ -383,7 +386,15 @@ def actualizar_totales_venta(cur, venta_id):
             SELECT venta_id,
                    SUM(total) total,
                    SUM(costo_total) costo_total
-            FROM ventas_platillo
+            FROM (
+                SELECT venta_id, total, costo_total
+                FROM ventas_platillo
+
+                UNION ALL
+
+                SELECT venta_id, total, costo_total
+                FROM ventas_no_encontrados
+            ) productos
             GROUP BY venta_id
         ) x ON x.venta_id = v.id
 
