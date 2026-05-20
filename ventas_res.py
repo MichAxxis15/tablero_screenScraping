@@ -375,40 +375,67 @@ def insertar_batch(cur, venta_id, items, pv_id):
 
 
 def actualizar_totales_venta(cur, venta_id):
-
+    """Actualiza totales de una venta incluyendo platillos, no encontrados y descuentos."""
+    
     cur.execute("""
         UPDATE ventas v
-
         LEFT JOIN (
             SELECT venta_id,
-                   SUM(total) total,
-                   SUM(costo_total) costo_total
+                SUM(total) AS total_platillos,
+                SUM(costo_total) AS costo_platillos
             FROM ventas_platillo
             GROUP BY venta_id
-        ) x ON x.venta_id = v.id
-
+        ) vp ON vp.venta_id = v.id
         LEFT JOIN (
             SELECT venta_id,
-                   SUM(monto) total_descuento
+                SUM(total) AS total_no_encontrados,
+                SUM(costo_total) AS costo_no_encontrados
+            FROM ventas_no_encontrados
+            GROUP BY venta_id
+        ) vne ON vne.venta_id = v.id
+        LEFT JOIN (
+            SELECT venta_id,
+                SUM(monto) AS total_descuento
             FROM ventas_descuentos
             GROUP BY venta_id
-        ) d ON d.venta_id = v.id
-
+        ) vd ON vd.venta_id = v.id
         SET 
-            v.subtotal = COALESCE(x.total, 0),
-            v.costo_total = COALESCE(x.costo_total, 0),
-            v.descuento = COALESCE(d.total_descuento, 0),
-            v.total = COALESCE(x.total, 0) + COALESCE(d.total_descuento, 0),
-            v.utilidad = (COALESCE(x.total, 0) + COALESCE(d.total_descuento, 0)) - COALESCE(x.costo_total, 0),
+            -- Calcular subtotal (suma de ventas sin descuentos)
+            v.subtotal = COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0),
+            
+            -- Calcular costo total
+            v.costo_total = COALESCE(vp.costo_platillos, 0) + COALESCE(vne.costo_no_encontrados, 0),
+            
+            -- Monto total de descuentos (ya debe ser negativo en la tabla)
+            v.descuento = COALESCE(vd.total_descuento, 0),
+            
+            -- Total final = ventas + descuentos (donde descuentos son negativos)
+            v.total = COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0) + COALESCE(vd.total_descuento, 0),
+            
+            -- Utilidad = total final - costo total
+            v.utilidad = (COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0) + COALESCE(vd.total_descuento, 0)) 
+                       - (COALESCE(vp.costo_platillos, 0) + COALESCE(vne.costo_no_encontrados, 0)),
+            
+            -- Margen = (utilidad / total) * 100
             v.margen = CASE 
-                WHEN (COALESCE(x.total, 0) + COALESCE(d.total_descuento, 0)) > 0 
-                THEN ((COALESCE(x.total, 0) + COALESCE(d.total_descuento, 0)) - COALESCE(x.costo_total, 0)) 
-                     / (COALESCE(x.total, 0) + COALESCE(d.total_descuento, 0)) * 100
-                ELSE 0
+                WHEN (COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0) + COALESCE(vd.total_descuento, 0)) > 0 
+                THEN ((COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0) + COALESCE(vd.total_descuento, 0)) 
+                      - (COALESCE(vp.costo_platillos, 0) + COALESCE(vne.costo_no_encontrados, 0))) 
+                     / (COALESCE(vp.total_platillos, 0) + COALESCE(vne.total_no_encontrados, 0) + COALESCE(vd.total_descuento, 0)) * 100
+                ELSE 0 
             END
-
         WHERE v.id = %s
     """, (venta_id,))
+    
+    # Verificar que la actualización fue correcta
+    cur.execute("""
+        SELECT subtotal, descuento, total, costo_total, utilidad, margen 
+        FROM ventas WHERE id = %s
+    """, (venta_id,))
+    
+    result = cur.fetchone()
+    log(f"Venta {venta_id}: subtotal={result['subtotal']}, descuento={result['descuento']}, "
+        f"total={result['total']}, costo={result['costo_total']}, utilidad={result['utilidad']}, margen={result['margen']:.2f}%")
 
 
 def reset_horas(page):
