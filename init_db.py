@@ -471,7 +471,7 @@ def initialize_database():
                     (68,'Rollos especiales',59,1),
                     (69,'Rollos empanizados',59,1),
                     (70,'Postres',59,1),
-                    (71,'Extras',59,1),
+                    (71,'Extras Sushi',59,1),
                     (72,'Ramen y pastas',59,1),
                     (73,'Especialidades',59,1),
                     (74,'Subrecetas Salsas',59,1),

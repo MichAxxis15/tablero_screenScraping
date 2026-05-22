@@ -7,7 +7,7 @@ from rich.console import Console
 from init_db import initialize_database, crear_vista_resumen
 import articulos
 import carga
-import ventas_res
+import ventas_screen
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,7 +39,7 @@ def execute_pipeline():
 
         console.rule("[bold blue]PASO 4: Procesando Resumen de Ventas[/bold blue]")
         with console.status("[yellow]Ejecutando scraper de ventas...", spinner="dots"):
-            ventas_res.main()
+            ventas_screen.main()
         logging.info("[green]✅ Proceso de ventas finalizado.[/green]\n")
 
         console.rule("[bold blue]PASO 5: Creando Vista de Resumen por Punto de Venta[/bold blue]")
