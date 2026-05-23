@@ -6,11 +6,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 
-load_dotenv(dotenv_path=".env")
+load_dotenv(dotenv_path="config.env")
 
 LOGIN_URL = os.getenv("LOGIN_URL")
-USER = os.getenv("DATUM_USER")
-PASSWORD = os.getenv("DATUM_PASSWORD")
+USER = os.getenv("DATUM_USER") or os.getenv("USER")
+PASSWORD = os.getenv("DATUM_PASSWORD") or os.getenv("PASSWORD")
 REP_EXIS_URL = os.getenv("REP_EXIS_URL")
 
 carpeta = os.path.join("articulos")
