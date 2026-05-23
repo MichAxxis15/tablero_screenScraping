@@ -48,7 +48,6 @@ def convertir_fecha(fecha_txt):
         return None
 
     dia, mes_txt, anio = partes
-
     mes = MESES.get(mes_txt, "01")
 
     return f"20{anio}-{mes}-{dia.zfill(2)}"
@@ -60,7 +59,6 @@ def parsear_medida(txt):
         return None, None
 
     txt = txt.replace(",", "").strip().lower()
-
     partes = txt.split()
 
     if len(partes) >= 2:
@@ -218,7 +216,6 @@ def guardar_articulos(conn, articulos):
             continue
 
         valores.append(
-
             (
                 familia_id,
                 numero,
@@ -228,7 +225,6 @@ def guardar_articulos(conn, articulos):
                 contenido,
                 art["ultimo_costo_compra"]
             )
-
         )
 
     sql = f"""
@@ -248,21 +244,15 @@ def guardar_articulos(conn, articulos):
     )
 
     ON CONFLICT (numero_articulo)
-
     DO UPDATE SET
 
         familia_id = EXCLUDED.familia_id,
-
         descripcion = EXCLUDED.descripcion,
-
         ultimo_mov = EXCLUDED.ultimo_mov,
-
         unidad_medida_id =
             EXCLUDED.unidad_medida_id,
-
         contenido =
             EXCLUDED.contenido,
-
         costo_unitario =
             EXCLUDED.costo_unitario
     """
@@ -308,47 +298,22 @@ def extraer_articulos(html):
 
     for tr in filas:
 
-        tds = tr.find_all(
-            "td"
-        )
+        tds = tr.find_all("td")
 
-        if (
-            len(tds) == 1
-            and tds[0].find("strong")
-            and not tds[0]
-            .find("strong")
-            .get("style")
-        ):
-
-            linea_actual = (
-                tds[0]
-                .text
-                .strip()
-            )
-
+        if (len(tds) == 1 and tds[0].find("strong") and not tds[0].find("strong").get("style")):
+            
+            linea_actual = (tds[0].text.strip())
             continue
 
-        if (
-            len(tds) == 1
-            and "padding-left:10px"
-            in str(tr)
-        ):
-
-            familia_actual = (
-                tds[0]
-                .text
-                .strip()
-            )
+        if (len(tds) == 1 and "padding-left:10px"in str(tr)):
+            
+            familia_actual = (tds[0].text.strip())
 
             continue
 
         if len(tds) >= 12:
 
-            numero = (
-                tds[1]
-                .text
-                .strip()
-            )
+            numero = (tds[1].text.strip())
 
             if not numero.isdigit():
                 continue
@@ -419,78 +384,32 @@ def main():
 
             print("Login")
 
-            page.goto(
-                LOGIN_URL
-            )
+            page.goto(LOGIN_URL)
+            page.fill('input[name="frUsuario"]', USER)
+            page.fill('input[name="frContrasena"]', PASSWORD)
+            page.click('button[type="submit"]')
+            
+            page.wait_for_load_state("networkidle")
+            print("Cargando datos...")
+            
+            page.goto(REP_EXIS_URL)
+            
+            page.wait_for_load_state("networkidle")
+            page.click('button[value="Buscar"]')
 
-            page.fill(
-                'input[name="frUsuario"]',
-                USER
-            )
-
-            page.fill(
-                'input[name="frContrasena"]',
-                PASSWORD
-            )
-
-            page.click(
-                'button[type="submit"]'
-            )
-
-            page.wait_for_load_state(
-                "networkidle"
-            )
-
-            print(
-                "Cargando datos..."
-            )
-
-            page.goto(
-                REP_EXIS_URL
-            )
-
-            page.wait_for_load_state(
-                "networkidle"
-            )
-
-            page.click(
-                'button[value="Buscar"]'
-            )
-
-            page.wait_for_load_state(
-                "networkidle",
-                timeout=100000
-            )
-
+            page.wait_for_load_state("networkidle", timeout=100000)
             html = page.content()
 
-            articulos = extraer_articulos(
-                html
-            )
+            articulos = extraer_articulos(html)
+            print(f"Extraídos: {len(articulos)}")
 
-            print(
-                f"Extraídos: {len(articulos)}"
-            )
+            df = pd.DataFrame(articulos)
 
-            df = pd.DataFrame(
-                articulos
-            )
+            ruta = os.path.join(carpeta, f"articulos_" f"{datetime.now().strftime('%H%M%S')}.xlsx")
 
-            ruta = os.path.join(
-                carpeta,
-                f"articulos_"
-                f"{datetime.now().strftime('%H%M%S')}.xlsx"
-            )
+            df.to_excel(ruta, index=False)
 
-            df.to_excel(
-                ruta,
-                index=False
-            )
-
-            guardar_articulos(
-                conn,
-                articulos
-            )
+            guardar_articulos( conn, articulos)
 
         finally:
 

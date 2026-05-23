@@ -47,6 +47,8 @@ def initialize_database():
         cursor.execute("CREATE SCHEMA IF NOT EXISTS datum_inter")
         cursor.execute("SET search_path TO datum_inter")
         
+        # cambiar serial por id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY
+        
         if table_exists(cursor, 'datum_inter', 'puntos_venta'):
             cursor.execute("SELECT COUNT(*) FROM datum_inter.puntos_venta")
             count = cursor.fetchone()[0]
