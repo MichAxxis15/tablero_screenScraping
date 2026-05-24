@@ -1,33 +1,27 @@
 import os
 import re
+import json
 import unicodedata
 from collections import defaultdict
-from datetime import datetime
 
 import pandas as pd
 import psycopg2
+
 from dotenv import load_dotenv
-from psycopg2.extras import Json, RealDictCursor
+from psycopg2.extras import RealDictCursor
 
 load_dotenv("config.env")
 
-FECHA_INI = os.getenv("FECHA_INICIO")
-FECHA_FIN = os.getenv("FECHA_FIN")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REPORTE_DIR = os.path.join(BASE_DIR, "reporte datum")
+
 EXCEL_PATH = os.getenv("EXCEL_PATH")
 
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST"),
-    "port": int(os.getenv("DB_PORT")),
-    "user": os.getenv("DB_USER"),
+    "host":     os.getenv("DB_HOST"),
+    "port":     os.getenv("DB_PORT"),
+    "dbname":   os.getenv("DB_NAME"),
+    "user":     os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
-    "dbname": os.getenv("DB_NAME"),
-}
-
-TURNOS = {
-    1: {"nombre": "Mañana", "inicio": "07:00:00", "fin": "13:59:00"},
-    2: {"nombre": "Tarde/Noche", "inicio": "14:00:00", "fin": "03:00:00"},
 }
 
 PLATILLOS = {}
@@ -36,63 +30,50 @@ PUNTOS_VENTA = {}
 DESCUENTOS = {}
 
 
-def log(msg):
-    print(f"[LOG] {msg}")
-
-
-def make_connection():
-    conn = psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
-    with conn.cursor() as cur:
-        cur.execute("SET search_path TO datum_inter")
+def conectar():
+    conn = psycopg2.connect(
+        **DB_CONFIG,
+        options="-c search_path=datum_inter",
+        cursor_factory=RealDictCursor,
+    )
     return conn
 
+def normalizar(valor):
+    if valor is None:
+        return ""
+    valor = str(valor).lower().strip()
+    valor = unicodedata.normalize("NFKD", valor)
+    valor = "".join(c for c in valor if not unicodedata.combining(c))
+    valor = re.sub(r"[^a-z0-9\s]", " ", valor)
+    valor = re.sub(r"\s+", " ", valor)
+    return valor.strip()
 
-def normalizar(texto):
-    if texto is None or pd.isna(texto):
-        return None
-    texto = str(texto).strip().lower()
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(c for c in texto if not unicodedata.combining(c))
-    texto = re.sub(r"[^a-z0-9\s]", " ", texto)
-    texto = re.sub(r"\s+", " ", texto).strip()
-    return texto or None
+def cargar_catalogos(cur):
+    global PLATILLOS, TIPOS, PUNTOS_VENTA, DESCUENTOS
 
+    cur.execute("SELECT id, nombre, costo_manual FROM platillos WHERE status=1")
+    PLATILLOS = {normalizar(x["nombre"]): x for x in cur.fetchall()}
 
-def normalizar_columna(texto):
-    texto = normalizar(texto)
-    return texto.replace(" ", "_") if texto else ""
+    cur.execute(
+        "SELECT id, nombre, punto_venta_id FROM tipos_producto WHERE status=1")
+    TIPOS = {normalizar(x["nombre"]): x for x in cur.fetchall()}
 
+    cur.execute("SELECT id, nombre FROM puntos_venta WHERE status=1")
+    PUNTOS_VENTA = {normalizar(x["nombre"]): x for x in cur.fetchall()}
 
-def limpiar_producto(texto):
-    texto = normalizar(texto)
-    return texto.replace("+", "").strip() if texto else None
+    cur.execute("""
+        SELECT id, nombre, punto_venta_id
+        FROM descuentos
+        WHERE status=1
+    """)
+    DESCUENTOS = {
+        (normalizar(x["nombre"]), x["punto_venta_id"]): x
+        for x in cur.fetchall()
+    }
 
-
-def limpiar_numero(valor, default=0):
-    if valor is None or pd.isna(valor):
-        return default
-    if isinstance(valor, str):
-        valor = valor.replace("$", "").replace(",", "").strip()
-    try:
-        return float(valor)
-    except (TypeError, ValueError):
-        return default
-
-
-def parsear_fecha(valor):
-    if valor is None or pd.isna(valor):
-        return None
-    if isinstance(valor, datetime):
-        return valor
-    fecha = pd.to_datetime(valor, dayfirst=True, errors="coerce")
-    return None if pd.isna(fecha) else fecha.to_pydatetime()
-
-
-def parsear_fecha_config(valor):
-    if not valor or not valor.strip():
-        return None
-    fecha = pd.to_datetime(valor.strip(), dayfirst=True, errors="coerce")
-    return None if pd.isna(fecha) else fecha.date()
+    print(f"Catálogos cargados → platillos: {len(PLATILLOS)}, "
+          f"tipos: {len(TIPOS)}, puntos_venta: {len(PUNTOS_VENTA)}, "
+          f"descuentos: {len(DESCUENTOS)}")
 
 
 def detectar_turno(fecha):
@@ -104,500 +85,434 @@ def detectar_turno(fecha):
     return None
 
 
-def encontrar_reporte_excel():
+def resolver_punto_real(punto_origen, tipo):
+    if tipo and tipo["punto_venta_id"]:
+        return tipo["punto_venta_id"]
+    return punto_origen
+
+
+def es_descuento(producto, tipo):
+    if producto.startswith("descuento"):
+        return True
+    if tipo and normalizar(tipo["nombre"]) == "descuentos":
+        return True
+    return False
+
+
+def obtener_excel():
     if EXCEL_PATH:
-        path = EXCEL_PATH.strip()
-        if not os.path.isabs(path):
-            path = os.path.join(BASE_DIR, path)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"No se encontró el archivo configurado en EXCEL_PATH: {path}")
-        return path
-
-    archivos = [
-        os.path.join(REPORTE_DIR, nombre)
-        for nombre in os.listdir(REPORTE_DIR)
-        if nombre.lower().endswith((".xlsx", ".xls")) and not nombre.startswith("~$")
-    ]
-    if not archivos:
-        raise FileNotFoundError(f"No se encontró un archivo Excel en {REPORTE_DIR}")
-    return max(archivos, key=os.path.getmtime)
+        ruta = EXCEL_PATH if os.path.isabs(
+            EXCEL_PATH) else os.path.join(BASE_DIR, EXCEL_PATH)
+        if os.path.exists(ruta):
+            return ruta
+    raise FileNotFoundError(f"EXCEL_PATH no encontrado: {EXCEL_PATH!r}")
 
 
-def cargar_catalogos(cur):
-    global PLATILLOS, TIPOS, PUNTOS_VENTA, DESCUENTOS
-
-    cur.execute("SELECT id, nombre, costo_manual FROM platillos WHERE status = 1")
-    PLATILLOS = {normalizar(row["nombre"]): row for row in cur.fetchall()}
-
-    cur.execute("SELECT id, nombre, punto_venta_id FROM tipos_producto WHERE status = 1")
-    TIPOS = {normalizar(row["nombre"]): row for row in cur.fetchall()}
-
-    cur.execute("SELECT id, nombre FROM puntos_venta WHERE status = 1")
-    PUNTOS_VENTA = {normalizar(row["nombre"]): row for row in cur.fetchall()}
-
-    cur.execute("""
-        SELECT id, nombre, punto_venta_id, tipo_producto_id
-        FROM descuentos
-        WHERE status = 1
-    """)
-    DESCUENTOS = {}
-    for row in cur.fetchall():
-        DESCUENTOS[(normalizar(row["nombre"]), row["punto_venta_id"])] = row
-
-    log(f"Platillos: {len(PLATILLOS)}")
-    log(f"Tipos producto: {len(TIPOS)}")
-    log(f"Puntos venta: {len(PUNTOS_VENTA)}")
-    log(f"Descuentos: {len(DESCUENTOS)}")
-
-
-def buscar_punto_venta(nombre_hoja):
-    hoja = normalizar(nombre_hoja)
+def buscar_punto_venta(hoja):
+    hoja = normalizar(hoja)
     if hoja in PUNTOS_VENTA:
         return PUNTOS_VENTA[hoja]
-
-    for nombre, punto_venta in PUNTOS_VENTA.items():
+    for nombre, pv in PUNTOS_VENTA.items():
         if nombre in hoja or hoja in nombre:
-            return punto_venta
-
+            return pv
     return None
 
 
-def leer_reporte_excel(path):
-    hojas = pd.read_excel(path, sheet_name=None)
-    fecha_ini = parsear_fecha_config(FECHA_INI)
-    fecha_fin = parsear_fecha_config(FECHA_FIN)
-    columnas_requeridas = {"producto", "tipo", "cantidad", "total_ventas", "fecha"}
+def leer_excel():
+    archivo = obtener_excel()
+    hojas = pd.read_excel(archivo, sheet_name=None)
     registros = []
+    filas_fallidas = []
 
     for nombre_hoja, df in hojas.items():
-        total_hoja = 0
-        punto_venta = buscar_punto_venta(nombre_hoja)
-        if not punto_venta:
-            log(f"Hoja omitida, no coincide con punto de venta: {nombre_hoja}")
+        print(f"\nHoja: {nombre_hoja!r}")
+        punto = buscar_punto_venta(nombre_hoja)
+
+        if punto is None:
+            print("  → sin punto de venta, se omite")
             continue
 
         if df.empty:
+            print("  → hoja vacía, se omite")
             continue
 
-        df = df.copy()
-        df.columns = [normalizar_columna(col) for col in df.columns]
-        faltantes = columnas_requeridas - set(df.columns)
-        if faltantes:
-            log(f"Hoja '{nombre_hoja}' omitida. Faltan columnas: {', '.join(sorted(faltantes))}")
+        df.columns = [normalizar(x) for x in df.columns]
+
+        requeridas = {"producto", "tipo", "cantidad", "total ventas", "fecha"}
+        faltan = requeridas - set(df.columns)
+        if faltan:
+            print(f"  → faltan columnas: {faltan}, se omite")
             continue
 
-        for _, row in df.iterrows():
-            fecha = parsear_fecha(row.get("fecha"))
-            if not fecha:
+        for idx, row in df.iterrows():
+            try:
+                fecha = pd.to_datetime(row["fecha"])
+            except Exception as e:
+                filas_fallidas.append(
+                    {"hoja": nombre_hoja, "fila": idx, "error": str(e)})
                 continue
 
-            fecha_dia = fecha.date()
-            if fecha_ini and fecha_dia < fecha_ini:
-                continue
-            if fecha_fin and fecha_dia > fecha_fin:
+            turno = detectar_turno(fecha)
+            if turno is None:
                 continue
 
-            turno_id = detectar_turno(fecha)
-            if not turno_id:
+            producto = normalizar(row["producto"])
+            tipo_txt = normalizar(row["tipo"])
+            tipo = TIPOS.get(tipo_txt)
+
+            try:
+                cantidad = float(row["cantidad"] or 0)
+                total = float(row["total ventas"] or 0)
+            except (ValueError, TypeError):
+                filas_fallidas.append(
+                    {"hoja": nombre_hoja, "fila": idx, "error": "cantidad/total inválido"})
                 continue
 
-            producto = limpiar_producto(row.get("producto"))
-            tipo = normalizar(row.get("tipo"))
-            cantidad = int(limpiar_numero(row.get("cantidad")))
-            total = limpiar_numero(row.get("total_ventas"))
-
-            if not producto or cantidad <= 0:
-                continue
+            pv_real = resolver_punto_real(punto["id"], tipo)
 
             registros.append({
-                "punto_venta_origen_id": punto_venta["id"],
-                "punto_venta_origen": punto_venta["nombre"],
-                "fecha": fecha_dia,
-                "turno_id": turno_id,
-                "producto": producto,
-                "tipo": tipo,
-                "cantidad": cantidad,
-                "total": total,
+                "fecha":            fecha.date(),
+                "hora":             fecha.time(),
+                "turno":            turno,
+                "producto":         producto,
+                "tipo":             tipo,
+                "cantidad":         cantidad,
+                "total":            total,
+                "punto_venta_real": pv_real,
             })
-            total_hoja += 1
 
-        log(f"Hoja '{nombre_hoja}': {total_hoja} registros válidos")
+    print(f"\nRegistros leídos: {len(registros)}")
+    if filas_fallidas:
+        print(f"Filas con error: {len(filas_fallidas)}")
+        for f in filas_fallidas[:10]:
+            print(f"  {f}")
 
     return registros
 
 
-def es_descuento(item, tipo):
-    if item["producto"].startswith("descuento"):
-        return True
-    return bool(tipo and normalizar(tipo["nombre"]) == "descuentos")
-
-
-def resolver_punto_venta_real(item, tipo, descuento=False):
-    if descuento:
-        return item["punto_venta_origen_id"]
-    if tipo and tipo.get("punto_venta_id"):
-        return tipo["punto_venta_id"]
-    return item["punto_venta_origen_id"]
-
-
-def buscar_descuento(item, punto_venta_id, tipo):
-    descuento = DESCUENTOS.get((item["producto"], punto_venta_id))
-    if descuento:
-        return descuento
-
-    candidatos = [
-        row for (nombre, pv_id), row in DESCUENTOS.items()
-        if pv_id == punto_venta_id and (nombre in item["producto"] or item["producto"] in nombre)
-    ]
-    if candidatos:
-        return candidatos[0]
-
-    if tipo and tipo.get("id"):
-        for row in DESCUENTOS.values():
-            if row["punto_venta_id"] == punto_venta_id and row["tipo_producto_id"] == tipo["id"]:
-                return row
-
-    return None
-
-
-def clasificar_item(item):
-    tipo = TIPOS.get(item["tipo"])
-    descuento = es_descuento(item, tipo)
-    punto_venta_id = resolver_punto_venta_real(item, tipo, descuento=descuento)
-
-    if descuento:
-        descuento_row = buscar_descuento(item, punto_venta_id, tipo)
-        return punto_venta_id, {
-            "clase": "descuento",
-            "descuento_id": descuento_row["id"] if descuento_row else None,
-            "nombre": item["producto"],
-            "tipo_producto_id": tipo["id"] if tipo else None,
-            "monto": -abs(item["total"]),
-        }
-
-    platillo = PLATILLOS.get(item["producto"])
-    if not platillo or not tipo:
-        return punto_venta_id, {
-            "clase": "no_encontrado",
-            "nombre": item["producto"],
-            "tipo_producto_id": tipo["id"] if tipo else None,
-            "cantidad": item["cantidad"],
-            "total": item["total"],
-            "costo_total": 0,
-            "utilidad": item["total"],
-            "margen": 100 if item["total"] else 0,
-        }
-
-    costo_unitario = float(platillo["costo_manual"] or 0)
-    costo_total = costo_unitario * item["cantidad"]
-    utilidad = item["total"] - costo_total
-    margen = (utilidad / item["total"] * 100) if item["total"] else 0
-
-    return punto_venta_id, {
-        "clase": "encontrado",
-        "platillo_id": platillo["id"],
-        "nombre": item["producto"],
-        "tipo_producto_id": tipo["id"],
-        "cantidad": item["cantidad"],
-        "precio_unitario": item["total"] / item["cantidad"] if item["cantidad"] else 0,
-        "total": item["total"],
-        "costo_unitario": costo_unitario,
-        "costo_total": costo_total,
-        "utilidad": utilidad,
-        "margen": margen,
-    }
-
-
-def agregar_item(agregado, item):
-    if item["clase"] == "encontrado":
-        key = (item["platillo_id"], item["tipo_producto_id"])
-        target = agregado["encontrados"].setdefault(key, {**item})
-        if target is not item:
-            target["cantidad"] += item["cantidad"]
-            target["total"] += item["total"]
-            target["costo_total"] += item["costo_total"]
-            target["utilidad"] = target["total"] - target["costo_total"]
-            target["precio_unitario"] = target["total"] / target["cantidad"] if target["cantidad"] else 0
-            target["margen"] = (target["utilidad"] / target["total"] * 100) if target["total"] else 0
-        return
-
-    if item["clase"] == "no_encontrado":
-        key = (item["nombre"], item["tipo_producto_id"])
-        target = agregado["no_encontrados"].setdefault(key, {**item})
-        if target is not item:
-            target["cantidad"] += item["cantidad"]
-            target["total"] += item["total"]
-            target["utilidad"] = target["total"]
-        return
-
-    key = (item["descuento_id"], item["nombre"], item["tipo_producto_id"])
-    target = agregado["descuentos"].setdefault(key, {**item})
-    if target is not item:
-        target["monto"] += item["monto"]
-
-
-def agrupar_por_dia_turno(registros):
+def agrupar_registros(registros):
     grupos = defaultdict(lambda: {
-        "encontrados": {},
-        "no_encontrados": {},
-        "descuentos": {},
+        "turno_manana":   [],
+        "turno_tarde":    [],
+        "encontrados":    [],
+        "no_encontrados": [],
+        "descuentos":     [],
+        "subtotal":       0.0,
+        "descuento":      0.0,
+        "total":          0.0,
     })
 
     for item in registros:
-        punto_venta_id, clasificado = clasificar_item(item)
-        key = (punto_venta_id, item["fecha"], item["turno_id"])
-        agregar_item(grupos[key], clasificado)
+        key = (item["punto_venta_real"], item["fecha"])
+        grupo = grupos[key]
+
+        registro = {
+            "producto": item["producto"],
+            "cantidad": item["cantidad"],
+            "venta":    item["total"],
+        }
+
+        # Turno
+        if item["turno"] == 1:
+            grupo["turno_manana"].append(registro)
+        else:
+            grupo["turno_tarde"].append(registro)
+
+        # Descuentos
+        if es_descuento(item["producto"], item["tipo"]):
+            grupo["descuentos"].append(registro)
+            monto_desc = abs(item["total"])
+            grupo["descuento"] += monto_desc
+            # suma (valor negativo en el POS)
+            grupo["subtotal"] += item["total"]
+            grupo["total"] = grupo["subtotal"] - grupo["descuento"]
+            continue
+
+        # Platillos
+        platillo = PLATILLOS.get(item["producto"])
+        if platillo:
+            costo_unit = float(platillo.get("costo_manual") or 0)
+            grupo["encontrados"].append({
+                **registro,
+                "platillo_id": platillo["id"],
+                "costo":       round(costo_unit * item["cantidad"], 2),
+            })
+        else:
+            grupo["no_encontrados"].append({
+                **registro,
+                "costo": 0,
+            })
+
+        grupo["subtotal"] += item["total"]
+        grupo["total"] = grupo["subtotal"] - grupo["descuento"]
 
     return grupos
 
 
-def serializar_items(items):
-    return [
-        {k: v for k, v in item.items() if k != "clase"}
-        for item in items.values()
-    ]
-
-
-def calcular_totales(encontrados, no_encontrados, descuentos):
-    subtotal = sum(item["total"] for item in encontrados)
-    subtotal += sum(item["total"] for item in no_encontrados)
-    descuento = sum(item["monto"] for item in descuentos)
-    costo_total = sum(item["costo_total"] for item in encontrados)
-    costo_total += sum(item["costo_total"] for item in no_encontrados)
-    total = subtotal + descuento
-    utilidad = total - costo_total
-    margen = (utilidad / total * 100) if total else 0
-    return {
-        "subtotal": round(subtotal, 2),
-        "descuento": round(descuento, 2),
-        "total": round(total, 2),
-        "costo_total": round(costo_total, 2),
-        "utilidad": round(utilidad, 2),
-        "margen": round(margen, 4),
-    }
-
-
-def construir_json_turno(turno_id, agregado):
-    encontrados = serializar_items(agregado["encontrados"])
-    no_encontrados = serializar_items(agregado["no_encontrados"])
-    descuentos = serializar_items(agregado["descuentos"])
-    totales = calcular_totales(encontrados, no_encontrados, descuentos)
-
-    return {
-        "turno_id": turno_id,
-        "nombre": TURNOS[turno_id]["nombre"],
-        **totales,
-        "encontrados": encontrados,
-        "no_encontrados": no_encontrados,
-        "descuentos": descuentos,
-    }
-
-
-def turno_vacio(turno_id):
-    return {
-        "turno_id": turno_id,
-        "nombre": TURNOS[turno_id]["nombre"],
-        "subtotal": 0,
-        "descuento": 0,
-        "total": 0,
-        "costo_total": 0,
-        "utilidad": 0,
-        "margen": 0,
-        "encontrados": [],
-        "no_encontrados": [],
-        "descuentos": [],
-    }
-
-
-def sumar_turnos(turno_manana, turno_tarde):
-    totales = {
-        campo: float(turno_manana[campo] or 0) + float(turno_tarde[campo] or 0)
-        for campo in ("subtotal", "descuento", "total", "costo_total")
-    }
-    totales["utilidad_bruta"] = totales["total"] - totales["costo_total"]
-    totales["margen"] = (totales["utilidad_bruta"] / totales["total"] * 100) if totales["total"] else 0
-    return {campo: round(valor, 2) for campo, valor in totales.items()}
-
-
-def obtener_o_crear_venta_anual(cur, punto_venta_id, anio):
+def upsert_venta_anual(cur, punto_venta_id, anio):
+    """Obtiene o crea el registro ventas_anuales. Devuelve su id."""
     cur.execute("""
         INSERT INTO ventas_anuales (punto_venta_id, anio)
         VALUES (%s, %s)
-        ON CONFLICT (punto_venta_id, anio) DO UPDATE SET
-            updated_at = CURRENT_TIMESTAMP
-        RETURNING id
+        ON CONFLICT (punto_venta_id, anio) DO NOTHING
+    """, (punto_venta_id, anio))
+
+    cur.execute("""
+        SELECT id FROM ventas_anuales
+        WHERE punto_venta_id = %s AND anio = %s
     """, (punto_venta_id, anio))
     return cur.fetchone()["id"]
 
 
-def obtener_o_crear_venta_mensual(cur, venta_anual_id, mes):
+def upsert_venta_mensual(cur, venta_anual_id, mes):
+    """Obtiene o crea el registro ventas_mensuales. Devuelve su id."""
     cur.execute("""
         INSERT INTO ventas_mensuales (venta_anual_id, mes)
         VALUES (%s, %s)
-        ON CONFLICT (venta_anual_id, mes) DO UPDATE SET
-            updated_at = CURRENT_TIMESTAMP
-        RETURNING id
+        ON CONFLICT (venta_anual_id, mes) DO NOTHING
+    """, (venta_anual_id, mes))
+
+    cur.execute("""
+        SELECT id FROM ventas_mensuales
+        WHERE venta_anual_id = %s AND mes = %s
     """, (venta_anual_id, mes))
     return cur.fetchone()["id"]
 
 
-def guardar_venta_diaria(cur, punto_venta_id, fecha, turno_manana, turno_tarde):
-    venta_anual_id = obtener_o_crear_venta_anual(cur, punto_venta_id, fecha.year)
-    venta_mensual_id = obtener_o_crear_venta_mensual(cur, venta_anual_id, fecha.month)
-    totales = sumar_turnos(turno_manana, turno_tarde)
+def calcular_metricas_dia(grupo):
+    """Calcula costo_total, utilidad_bruta y margen a partir de encontrados."""
+    costo_total = sum(e.get("costo", 0) for e in grupo["encontrados"])
+    total = grupo["total"]
+    utilidad = round(total - costo_total, 2)
+    margen = round((utilidad / total * 100), 4) if total else 0.0
+    return costo_total, utilidad, margen
+
+
+def upsert_venta_diaria(cur, venta_mensual_id, fecha, grupo):
+    """
+    Inserta o actualiza ventas_diarias.
+    Si ya existe el registro del día, suma los valores nuevos al existente
+    (comportamiento útil cuando se reimporta el mismo Excel).
+    """
+    dia = fecha.day
+
+    costo_total, utilidad, margen = calcular_metricas_dia(grupo)
 
     cur.execute("""
         INSERT INTO ventas_diarias (
-            venta_mensual_id, dia, fecha, turno_manana, turno_tarde,
-            subtotal, descuento, total, costo_total, utilidad_bruta, margen
+            venta_mensual_id,
+            dia,
+            fecha,
+            turno_manana,
+            turno_tarde,
+            encontrados,
+            no_encontrados,
+            descuentos,
+            subtotal,
+            descuento,
+            total,
+            costo_total,
+            utilidad_bruta,
+            margen
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (
+            %s, %s, %s,
+            %s::jsonb, %s::jsonb,
+            %s::jsonb, %s::jsonb, %s::jsonb,
+            %s, %s, %s, %s, %s, %s
+        )
         ON CONFLICT (venta_mensual_id, dia) DO UPDATE SET
-            fecha = EXCLUDED.fecha,
-            turno_manana = EXCLUDED.turno_manana,
-            turno_tarde = EXCLUDED.turno_tarde,
-            subtotal = EXCLUDED.subtotal,
-            descuento = EXCLUDED.descuento,
-            total = EXCLUDED.total,
-            costo_total = EXCLUDED.costo_total,
-            utilidad_bruta = EXCLUDED.utilidad_bruta,
-            margen = EXCLUDED.margen,
-            updated_at = CURRENT_TIMESTAMP
+            turno_manana   = ventas_diarias.turno_manana   || EXCLUDED.turno_manana,
+            turno_tarde    = ventas_diarias.turno_tarde    || EXCLUDED.turno_tarde,
+            encontrados    = ventas_diarias.encontrados    || EXCLUDED.encontrados,
+            no_encontrados = ventas_diarias.no_encontrados || EXCLUDED.no_encontrados,
+            descuentos     = ventas_diarias.descuentos     || EXCLUDED.descuentos,
+            subtotal       = ventas_diarias.subtotal       + EXCLUDED.subtotal,
+            descuento      = ventas_diarias.descuento      + EXCLUDED.descuento,
+            total          = ventas_diarias.total          + EXCLUDED.total,
+            costo_total    = ventas_diarias.costo_total    + EXCLUDED.costo_total,
+            utilidad_bruta = ventas_diarias.utilidad_bruta + EXCLUDED.utilidad_bruta,
+            margen         = EXCLUDED.margen,
+            updated_at     = CURRENT_TIMESTAMP
     """, (
         venta_mensual_id,
-        fecha.day,
+        dia,
         fecha,
-        Json(turno_manana),
-        Json(turno_tarde),
-        totales["subtotal"],
-        totales["descuento"],
-        totales["total"],
-        totales["costo_total"],
-        totales["utilidad_bruta"],
-        totales["margen"],
+        json.dumps(grupo["turno_manana"]),
+        json.dumps(grupo["turno_tarde"]),
+        json.dumps(grupo["encontrados"]),
+        json.dumps(grupo["no_encontrados"]),
+        json.dumps(grupo["descuentos"]),
+        round(grupo["subtotal"], 2),
+        round(grupo["descuento"], 2),
+        round(grupo["total"],    2),
+        round(costo_total,       2),
+        utilidad,
+        margen,
     ))
 
 
-def actualizar_venta_mensual(cur, punto_venta_id, anio, mes):
+def actualizar_venta_mensual(cur, venta_mensual_id):
+    """Recalcula totales del mes sumando todos sus días."""
     cur.execute("""
-        WITH mensual AS (
-            SELECT
-                vm.id AS venta_mensual_id,
-                COALESCE(SUM(vd.subtotal), 0) AS subtotal,
-                COALESCE(SUM(vd.descuento), 0) AS descuento,
-                COALESCE(SUM(vd.total), 0) AS total,
-                COALESCE(SUM(vd.costo_total), 0) AS costo_total,
-                COALESCE(SUM(vd.utilidad_bruta), 0) AS utilidad_bruta
-            FROM ventas_mensuales vm
-            JOIN ventas_anuales va ON va.id = vm.venta_anual_id
-            LEFT JOIN ventas_diarias vd ON vd.venta_mensual_id = vm.id
-            WHERE va.punto_venta_id = %s
-              AND va.anio = %s
-              AND vm.mes = %s
-            GROUP BY vm.id
-        )
-        UPDATE ventas_mensuales AS vm
+        UPDATE ventas_mensuales vm
         SET
-            subtotal = mensual.subtotal,
-            descuento = mensual.descuento,
-            total = mensual.total,
-            costo_total = mensual.costo_total,
-            utilidad_bruta = mensual.utilidad_bruta,
-            margen = CASE
-                WHEN mensual.total > 0
-                THEN mensual.utilidad_bruta / mensual.total * 100
-                ELSE 0
-            END,
-            updated_at = CURRENT_TIMESTAMP
-        FROM mensual
-        WHERE vm.id = mensual.venta_mensual_id
-    """, (punto_venta_id, anio, mes))
+            subtotal       = sub.subtotal,
+            descuento      = sub.descuento,
+            total          = sub.total,
+            costo_total    = sub.costo_total,
+            utilidad_bruta = sub.utilidad_bruta,
+            margen         = CASE WHEN sub.total > 0
+                                  THEN ROUND((sub.utilidad_bruta / sub.total) * 100, 4)
+                                  ELSE 0 END,
+            updated_at     = CURRENT_TIMESTAMP
+        FROM (
+            SELECT
+                SUM(subtotal)       AS subtotal,
+                SUM(descuento)      AS descuento,
+                SUM(total)          AS total,
+                SUM(costo_total)    AS costo_total,
+                SUM(utilidad_bruta) AS utilidad_bruta
+            FROM ventas_diarias
+            WHERE venta_mensual_id = %s
+        ) sub
+        WHERE vm.id = %s
+    """, (venta_mensual_id, venta_mensual_id))
 
 
-def actualizar_venta_anual(cur, punto_venta_id, anio):
+def actualizar_venta_anual(cur, venta_anual_id):
+    """Recalcula totales del año sumando todos sus meses."""
     cur.execute("""
-        WITH anual AS (
-            SELECT
-                va.id AS venta_anual_id,
-                COALESCE(SUM(vm.subtotal), 0) AS subtotal,
-                COALESCE(SUM(vm.descuento), 0) AS descuento,
-                COALESCE(SUM(vm.total), 0) AS total,
-                COALESCE(SUM(vm.costo_total), 0) AS costo_total,
-                COALESCE(SUM(vm.utilidad_bruta), 0) AS utilidad_bruta
-            FROM ventas_anuales va
-            LEFT JOIN ventas_mensuales vm ON vm.venta_anual_id = va.id
-            WHERE va.punto_venta_id = %s
-              AND va.anio = %s
-            GROUP BY va.id
-        )
-        UPDATE ventas_anuales AS va
+        UPDATE ventas_anuales va
         SET
-            subtotal = anual.subtotal,
-            descuento = anual.descuento,
-            total = anual.total,
-            costo_total = anual.costo_total,
-            utilidad_bruta = anual.utilidad_bruta,
-            margen = CASE
-                WHEN anual.total > 0
-                THEN anual.utilidad_bruta / anual.total * 100
-                ELSE 0
-            END,
-            updated_at = CURRENT_TIMESTAMP
-        FROM anual
-        WHERE va.id = anual.venta_anual_id
-    """, (punto_venta_id, anio))
+            subtotal       = sub.subtotal,
+            descuento      = sub.descuento,
+            total          = sub.total,
+            costo_total    = sub.costo_total,
+            utilidad_bruta = sub.utilidad_bruta,
+            margen         = CASE WHEN sub.total > 0
+                                  THEN ROUND((sub.utilidad_bruta / sub.total) * 100, 4)
+                                  ELSE 0 END,
+            updated_at     = CURRENT_TIMESTAMP
+        FROM (
+            SELECT
+                SUM(subtotal)       AS subtotal,
+                SUM(descuento)      AS descuento,
+                SUM(total)          AS total,
+                SUM(costo_total)    AS costo_total,
+                SUM(utilidad_bruta) AS utilidad_bruta
+            FROM ventas_mensuales
+            WHERE venta_anual_id = %s
+        ) sub
+        WHERE va.id = %s
+    """, (venta_anual_id, venta_anual_id))
 
 
-def guardar_ventas(cur, grupos):
-    dias = defaultdict(dict)
-    periodos = set()
+def persistir_grupos(cur, grupos):
+    """
+    Recorre todos los grupos (punto_venta_real, fecha) e inserta / actualiza
+    la jerarquía ventas_anuales → ventas_mensuales → ventas_diarias.
+    """
+    # Conjuntos para saber qué mensuales y anuales actualizar al final
+    mensuales_tocados = set()
+    anuales_tocados = {}   # venta_anual_id → (punto_venta_id, anio)
 
-    for (punto_venta_id, fecha, turno_id), agregado in grupos.items():
-        dias[(punto_venta_id, fecha)][turno_id] = construir_json_turno(turno_id, agregado)
+    total_grupos = len(grupos)
+    print(f"\nInsertando {total_grupos} grupos en la BD...")
 
-    for (punto_venta_id, fecha), turnos in sorted(dias.items(), key=lambda item: (item[0][0], item[0][1])):
-        turno_manana = turnos.get(1, turno_vacio(1))
-        turno_tarde = turnos.get(2, turno_vacio(2))
-        guardar_venta_diaria(cur, punto_venta_id, fecha, turno_manana, turno_tarde)
-        periodos.add((punto_venta_id, fecha.year, fecha.month))
+    for i, ((punto_venta_id, fecha), grupo) in enumerate(grupos.items(), 1):
+        anio = fecha.year
+        mes = fecha.month
 
-    for punto_venta_id, anio, mes in sorted(periodos):
-        actualizar_venta_mensual(cur, punto_venta_id, anio, mes)
+        va_id = upsert_venta_anual(cur, punto_venta_id, anio)
+        vm_id = upsert_venta_mensual(cur, va_id, mes)
 
-    for punto_venta_id, anio in sorted({(pv, anio) for pv, anio, _ in periodos}):
-        actualizar_venta_anual(cur, punto_venta_id, anio)
+        upsert_venta_diaria(cur, vm_id, fecha, grupo)
 
-    return len(dias), len(periodos)
+        mensuales_tocados.add(vm_id)
+        anuales_tocados[va_id] = (punto_venta_id, anio)
 
+        if i % 50 == 0 or i == total_grupos:
+            print(f"  {i}/{total_grupos} grupos procesados")
+
+    # Recalcular jerárquicamente
+    print("Recalculando totales mensuales...")
+    for vm_id in mensuales_tocados:
+        actualizar_venta_mensual(cur, vm_id)
+
+    print("Recalculando totales anuales...")
+    for va_id in anuales_tocados:
+        actualizar_venta_anual(cur, va_id)
+
+    print("Persistencia completada.")
+
+def imprimir_resumen(grupos):
+    print("\n" + "=" * 60)
+    print("RESUMEN DE IMPORTACIÓN")
+    print("=" * 60)
+
+    total_ventas = 0.0
+    total_descuentos = 0.0
+    total_encontrados = 0
+    total_no_encontrados = 0
+
+    for (pv_id, fecha), grupo in grupos.items():
+        total_ventas += grupo["total"]
+        total_descuentos += grupo["descuento"]
+        total_encontrados += len(grupo["encontrados"])
+        total_no_encontrados += len(grupo["no_encontrados"])
+
+    print(f"Grupos (punto_venta × día): {len(grupos)}")
+    print(f"Venta total neta:           ${total_ventas:,.2f}")
+    print(f"Descuentos totales:         ${total_descuentos:,.2f}")
+    print(f"Platillos encontrados:      {total_encontrados}")
+    print(f"Productos no encontrados:   {total_no_encontrados}")
+    print("=" * 60)
+
+    if total_no_encontrados:
+        print("\nProductos sin coincidencia en catálogo (primeros 20):")
+        vistos = set()
+        for grupo in grupos.values():
+            for p in grupo["no_encontrados"]:
+                if p["producto"] not in vistos:
+                    print(f"  • {p['producto']}")
+                    vistos.add(p["producto"])
+                if len(vistos) >= 20:
+                    break
+            if len(vistos) >= 20:
+                break
 
 def main():
-    reporte = encontrar_reporte_excel()
-    log(f"Leyendo reporte Excel: {os.path.basename(reporte)}")
+    conn = conectar()
 
-    conn = make_connection()
     try:
         with conn.cursor() as cur:
+            # Etapas 1–4: catálogos y lectura
             cargar_catalogos(cur)
-            registros = leer_reporte_excel(reporte)
+            registros = leer_excel()
+
             if not registros:
-                raise ValueError(
-                    "El reporte no generó registros válidos. Revisa FECHA_INICIO/FECHA_FIN, "
-                    "nombres de hojas contra puntos_venta y columnas del Excel."
-                )
-            log(f"Registros válidos leídos: {len(registros)}")
-            grupos = agrupar_por_dia_turno(registros)
-            log(f"Grupos por punto de venta, día y turno: {len(grupos)}")
-            dias, meses = guardar_ventas(cur, grupos)
-            conn.commit()
-            log(f"Ventas diarias actualizadas: {dias}")
-            log(f"Ventas mensuales recalculadas: {meses}")
-    except Exception:
+                print(
+                    "Sin registros para importar. Revisa el Excel y las columnas requeridas.")
+                return
+
+            # Etapas 5–8: agrupación
+            grupos = agrupar_registros(registros)
+            imprimir_resumen(grupos)
+
+            # Etapas 9–10: persistencia
+            persistir_grupos(cur, grupos)
+
+        conn.commit()
+        print("\n✓ Importación completada y confirmada en la base de datos.")
+
+    except Exception as e:
         conn.rollback()
+        print(f"\n✗ Error durante la importación: {e}")
         raise
+
     finally:
         conn.close()
-
-    log("Carga de ventas desde Excel completada")
 
 
 if __name__ == "__main__":
