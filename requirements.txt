@@ -1,10 +1,9 @@
 playwright
 bs4
 pandas
-pymysql
 datetime
 dotenv
 openpyxl
-mysql-connector-python
+psycopg2-binary
 rich
 cryptography

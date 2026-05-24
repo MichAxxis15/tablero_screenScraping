@@ -1,5 +1,6 @@
 import pandas as pd
-import pymysql
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
 import math
 import logging
@@ -7,6 +8,7 @@ from dotenv import load_dotenv
 from contextlib import contextmanager
 from collections import defaultdict
 
+load_dotenv("config.env")
 load_dotenv()
 
 DB_CONFIG = {
@@ -14,8 +16,8 @@ DB_CONFIG = {
     "port": int(os.getenv("DB_PORT")),
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
-    "database": os.getenv("DB_NAME"),
-    "cursorclass": pymysql.cursors.DictCursor
+    "dbname": os.getenv("DB_NAME"),
+    "cursor_factory": RealDictCursor
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,8 +30,10 @@ logging.basicConfig(
 
 @contextmanager
 def get_db_connection():
-    conn = pymysql.connect(**DB_CONFIG)
+    conn = psycopg2.connect(**DB_CONFIG)
     try:
+        with conn.cursor() as cursor:
+            cursor.execute("SET search_path TO datum_inter")
         yield conn
         conn.commit()
     except Exception as e:
@@ -195,26 +199,28 @@ def actualizar_costo_parcial_componentes(cursor, tabla, receta_id):
         tabla_principal = 'platillos'
     
     cursor.execute(f"""
-        UPDATE {tabla} pc
-        JOIN articulos a ON pc.articulo_id = a.id
-        SET pc.costo_parcial = ROUND(pc.cantidad * (a.costo_unitario / NULLIF(a.contenido, 0)), 2)
-        WHERE pc.{campo_id} = %s AND pc.articulo_id IS NOT NULL
+        UPDATE {tabla} AS pc
+        SET costo_parcial = ROUND((pc.cantidad * (a.costo_unitario / NULLIF(a.contenido, 0)))::numeric, 2)
+        FROM articulos AS a
+        WHERE pc.articulo_id = a.id
+          AND pc.{campo_id} = %s
+          AND pc.articulo_id IS NOT NULL
     """, (receta_id,))
     
     # Para componentes que son subrecetas (costo_manual)
     cursor.execute(f"""
-        UPDATE {tabla} pc
-        SET pc.costo_parcial = 0
+        UPDATE {tabla} AS pc
+        SET costo_parcial = 0
         WHERE pc.{campo_id} = %s AND pc.subreceta_id IS NOT NULL
     """, (receta_id,))
 
 def actualizar_costo_platillo(cursor, platillo_id):
     """Actualiza el costo_manual del platillo sumando sus componentes"""
     cursor.execute("""
-        UPDATE platillos p
-        SET p.costo_manual = (
+        UPDATE platillos AS p
+        SET costo_manual = (
             SELECT COALESCE(SUM(pc.costo_parcial), 0)
-            FROM platillo_componentes pc
+            FROM platillo_componentes AS pc
             WHERE pc.platillo_id = p.id
         )
         WHERE p.id = %s
@@ -241,10 +247,10 @@ def procesar_subrecetas(cursor, cache, df):
         cursor.executemany("""
             INSERT INTO subrecetas(nombre, rendimiento, unidad_medida_id)
             VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                rendimiento = VALUES(rendimiento),
-                unidad_medida_id = VALUES(unidad_medida_id),
-                updated_at = NOW()
+            ON CONFLICT (nombre) DO UPDATE SET
+                rendimiento = EXCLUDED.rendimiento,
+                unidad_medida_id = EXCLUDED.unidad_medida_id,
+                updated_at = CURRENT_TIMESTAMP
         """, subrecetas_a_crear)
         
         # Actualizar caché con nuevas subrecetas
@@ -315,7 +321,12 @@ def procesar_subrecetas(cursor, cache, df):
         cursor.executemany("""
             INSERT INTO subreceta_componentes
             (subreceta_padre_id, articulo_id, subreceta_id, cantidad, costo_parcial, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (subreceta_padre_id, COALESCE(articulo_id, 0), COALESCE(subreceta_id, 0))
+            DO UPDATE SET
+                cantidad = subreceta_componentes.cantidad + EXCLUDED.cantidad,
+                costo_parcial = COALESCE(subreceta_componentes.costo_parcial, 0) + COALESCE(EXCLUDED.costo_parcial, 0),
+                updated_at = CURRENT_TIMESTAMP
         """, componentes)
         
         logging.info(f"✅ Subrecetas: {stats['totales']} componentes procesados "
@@ -354,9 +365,10 @@ def procesar_productos(cursor, cache, df, tipo):
             else:
                 cursor.execute("""
                     INSERT INTO platillos(nombre, categoria_id, created_at, updated_at)
-                    VALUES (%s, %s, NOW(), NOW())
+                    VALUES (%s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    RETURNING id
                 """, (nombre, categoria_id))
-                producto_id = cursor.lastrowid
+                producto_id = cursor.fetchone()["id"]
             
             productos_procesados[nombre] = producto_id
             stats["productos"] += 1
@@ -405,7 +417,12 @@ def procesar_productos(cursor, cache, df, tipo):
         cursor.executemany("""
             INSERT INTO platillo_componentes
             (platillo_id, articulo_id, subreceta_id, cantidad, costo_parcial, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (platillo_id, COALESCE(articulo_id, 0), COALESCE(subreceta_id, 0))
+            DO UPDATE SET
+                cantidad = platillo_componentes.cantidad + EXCLUDED.cantidad,
+                costo_parcial = COALESCE(platillo_componentes.costo_parcial, 0) + COALESCE(EXCLUDED.costo_parcial, 0),
+                updated_at = CURRENT_TIMESTAMP
         """, componentes)
         
         # Actualizar costos de productos

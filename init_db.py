@@ -1,8 +1,8 @@
 import psycopg2
-from psycopg2 import sql
 from dotenv import load_dotenv
 import os
 
+load_dotenv("config.env")
 load_dotenv()
 
 def get_db_connection():
@@ -36,6 +36,72 @@ def table_exists(cursor, schema_name, table_name):
     """, (schema_name, table_name))
     return cursor.fetchone()[0]
 
+def crear_vista_resumen(cursor=None):
+    """Crea o actualiza la vista de resumen por punto de venta."""
+    owns_connection = cursor is None
+    connexion = None
+
+    try:
+        if owns_connection:
+            connexion = get_db_connection()
+            cursor = connexion.cursor()
+            cursor.execute("SET search_path TO datum_inter")
+
+        cursor.execute("""
+            CREATE OR REPLACE VIEW datum_inter.v_resumen_punto_venta AS
+            WITH totales_globales AS (
+                SELECT
+                    SUM(va.total)          AS gran_total_ventas,
+                    SUM(va.costo_total)    AS gran_total_costos,
+                    SUM(va.utilidad_bruta) AS gran_total_utilidad
+                FROM datum_inter.ventas_anuales va
+            ),
+            detalle AS (
+                SELECT
+                    pv.nombre              AS punto_venta,
+                    SUM(va.total)          AS ventas,
+                    SUM(va.costo_total)    AS costos,
+                    SUM(va.utilidad_bruta) AS utilidad_bruta
+                FROM datum_inter.ventas_anuales va
+                JOIN datum_inter.puntos_venta pv ON pv.id = va.punto_venta_id
+                GROUP BY pv.nombre
+            )
+            SELECT
+                d.punto_venta AS punto_de_venta,
+                d.ventas,
+                ROUND((d.ventas / NULLIF(t.gran_total_ventas, 0)) * 100, 2) AS pct_ventas,
+                d.costos,
+                ROUND((d.costos / NULLIF(t.gran_total_costos, 0)) * 100, 2) AS pct_costos,
+                d.utilidad_bruta AS ut_bruta,
+                ROUND((d.utilidad_bruta / NULLIF(t.gran_total_utilidad, 0)) * 100, 2) AS pct_ut_bruta,
+                ROUND((d.utilidad_bruta / NULLIF(d.ventas, 0)) * 100, 2) AS margen_pct
+            FROM detalle d
+            CROSS JOIN totales_globales t
+            UNION ALL
+            SELECT
+                'Total',
+                t.gran_total_ventas,
+                100.00,
+                t.gran_total_costos,
+                100.00,
+                t.gran_total_utilidad,
+                100.00,
+                ROUND((t.gran_total_utilidad / NULLIF(t.gran_total_ventas, 0)) * 100, 2)
+            FROM totales_globales t
+        """)
+
+        if owns_connection:
+            connexion.commit()
+    except Exception:
+        if owns_connection and connexion:
+            connexion.rollback()
+        raise
+    finally:
+        if owns_connection and cursor:
+            cursor.close()
+        if owns_connection and connexion and not connexion.closed:
+            connexion.close()
+
 def initialize_database():
     connexion = None
     cursor = None
@@ -53,8 +119,7 @@ def initialize_database():
             cursor.execute("SELECT COUNT(*) FROM datum_inter.puntos_venta")
             count = cursor.fetchone()[0]
             if count > 0:
-                print(f"La base de datos ya contiene {count} registros en puntos_venta. Saltando inicialización...")
-                return
+                print(f"La base de datos ya contiene {count} registros en puntos_venta. Actualizando estructura...")
         else:
             print("Base de datos vacía. Inicializando estructura y datos...")
         
@@ -76,6 +141,7 @@ def initialize_database():
                 status  SMALLINT     DEFAULT 1
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_lineas_nombre ON datum_inter.lineas (nombre)")
         
         print("Creando tabla: familias")
         cursor.execute("""
@@ -86,6 +152,8 @@ def initialize_database():
                 status    SMALLINT     DEFAULT 1
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_familias_nombre_linea ON datum_inter.familias (nombre, linea_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_familias_linea ON datum_inter.familias (linea_id)")
         
         print("Creando tabla: unidades_medida")
         cursor.execute("""
@@ -96,6 +164,7 @@ def initialize_database():
                 factor_base  NUMERIC(10,4)  DEFAULT 1.0000
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_unidades_clave ON datum_inter.unidades_medida (clave)")
         
         print("Creando tabla: articulos")
         cursor.execute("""
@@ -133,6 +202,8 @@ def initialize_database():
                 status     SMALLINT     DEFAULT 1
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_categorias_nombre_parent ON datum_inter.categorias_producto (nombre, parent_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_categorias_parent ON datum_inter.categorias_producto (parent_id)")
         
         print("Creando tabla: puntos_venta")
         cursor.execute("""
@@ -144,6 +215,7 @@ def initialize_database():
                 updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_puntos_venta_nombre ON datum_inter.puntos_venta (nombre)")
         
         cursor.execute("""
             DROP TRIGGER IF EXISTS trg_puntos_venta_updated_at ON datum_inter.puntos_venta;
@@ -163,6 +235,7 @@ def initialize_database():
                 updated_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_tipos_producto_nombre ON datum_inter.tipos_producto (nombre)")
         
         cursor.execute("""
             DROP TRIGGER IF EXISTS trg_tipos_producto_updated_at ON datum_inter.tipos_producto;
@@ -181,6 +254,9 @@ def initialize_database():
                 tipo_producto_id INT          NOT NULL REFERENCES datum_inter.tipos_producto(id)
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_descuentos_nombre ON datum_inter.descuentos (nombre)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_descuentos_pv ON datum_inter.descuentos (punto_venta_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_descuentos_tp ON datum_inter.descuentos (tipo_producto_id)")
         
         print("Creando tabla: turnos")
         cursor.execute("""
@@ -193,6 +269,7 @@ def initialize_database():
                 updated_at  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_turnos_nombre ON datum_inter.turnos (nombre)")
         
         cursor.execute("""
             DROP TRIGGER IF EXISTS trg_turnos_updated_at ON datum_inter.turnos;
@@ -282,6 +359,211 @@ def initialize_database():
                 BEFORE UPDATE ON datum_inter.platillos
                 FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
         """)
+
+        print("Creando tabla: platillo_componentes")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.platillo_componentes (
+                id                  SERIAL PRIMARY KEY,
+                platillo_id         INT           NOT NULL REFERENCES datum_inter.platillos(id) ON DELETE CASCADE,
+                articulo_id         INT           REFERENCES datum_inter.articulos(id),
+                subreceta_id        INT           REFERENCES datum_inter.subrecetas(id),
+                cantidad            NUMERIC(10,3) NOT NULL,
+                costo_parcial       NUMERIC(10,2),
+                created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT chk_platillo_componente CHECK (
+                    (articulo_id IS NOT NULL AND subreceta_id IS NULL) OR
+                    (articulo_id IS NULL AND subreceta_id IS NOT NULL)
+                )
+            )
+        """)
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_platillo_componentes
+            ON datum_inter.platillo_componentes (platillo_id,
+                                                 COALESCE(articulo_id, 0),
+                                                 COALESCE(subreceta_id, 0))
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_platillo_comp_articulo ON datum_inter.platillo_componentes (articulo_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_platillo_comp_sub ON datum_inter.platillo_componentes (subreceta_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_platillo_componentes_updated_at ON datum_inter.platillo_componentes;
+            CREATE TRIGGER trg_platillo_componentes_updated_at
+                BEFORE UPDATE ON datum_inter.platillo_componentes
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        print("Creando tablas de ventas jerarquicas")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_anuales (
+                id              SERIAL PRIMARY KEY,
+                punto_venta_id  INT           NOT NULL REFERENCES datum_inter.puntos_venta(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+                anio            SMALLINT      NOT NULL,
+                subtotal        NUMERIC(14,2) DEFAULT 0.00,
+                descuento       NUMERIC(14,2) DEFAULT 0.00,
+                total           NUMERIC(14,2) DEFAULT 0.00,
+                costo_total     NUMERIC(14,2) DEFAULT 0.00,
+                utilidad_bruta  NUMERIC(14,2) DEFAULT 0.00,
+                margen          NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_venta_anual UNIQUE (punto_venta_id, anio)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_anuales_pv ON datum_inter.ventas_anuales (punto_venta_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_anuales_updated_at ON datum_inter.ventas_anuales;
+            CREATE TRIGGER trg_ventas_anuales_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_anuales
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_mensuales (
+                id               SERIAL PRIMARY KEY,
+                venta_anual_id   INT           NOT NULL REFERENCES datum_inter.ventas_anuales(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                mes              SMALLINT      NOT NULL CHECK (mes BETWEEN 1 AND 12),
+                subtotal         NUMERIC(14,2) DEFAULT 0.00,
+                descuento        NUMERIC(14,2) DEFAULT 0.00,
+                total            NUMERIC(14,2) DEFAULT 0.00,
+                costo_total      NUMERIC(14,2) DEFAULT 0.00,
+                utilidad_bruta   NUMERIC(14,2) DEFAULT 0.00,
+                margen           NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_venta_mensual UNIQUE (venta_anual_id, mes)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_mensuales_anual ON datum_inter.ventas_mensuales (venta_anual_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_mensuales_updated_at ON datum_inter.ventas_mensuales;
+            CREATE TRIGGER trg_ventas_mensuales_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_mensuales
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_diarias (
+                id                  SERIAL PRIMARY KEY,
+                venta_mensual_id    INT           NOT NULL REFERENCES datum_inter.ventas_mensuales(id) ON DELETE CASCADE ON UPDATE CASCADE,
+                dia                 SMALLINT      NOT NULL CHECK (dia BETWEEN 1 AND 31),
+                fecha               DATE          NOT NULL,
+                turno_manana        JSON,
+                turno_tarde         JSON,
+                subtotal            NUMERIC(14,2) DEFAULT 0.00,
+                descuento           NUMERIC(14,2) DEFAULT 0.00,
+                total               NUMERIC(14,2) DEFAULT 0.00,
+                costo_total         NUMERIC(14,2) DEFAULT 0.00,
+                utilidad_bruta      NUMERIC(14,2) DEFAULT 0.00,
+                margen              NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_venta_diaria UNIQUE (venta_mensual_id, dia)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_diarias_mensual ON datum_inter.ventas_diarias (venta_mensual_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_diarias_fecha ON datum_inter.ventas_diarias (fecha)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_diarias_updated_at ON datum_inter.ventas_diarias;
+            CREATE TRIGGER trg_ventas_diarias_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_diarias
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        print("Creando tablas operativas de ventas")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas (
+                id              SERIAL PRIMARY KEY,
+                punto_venta_id  INT           NOT NULL REFERENCES datum_inter.puntos_venta(id),
+                turno_id        INT           NOT NULL REFERENCES datum_inter.turnos(id),
+                periodo_inicio  DATE          NOT NULL,
+                periodo_fin     DATE          NOT NULL,
+                subtotal        NUMERIC(14,2) DEFAULT 0.00,
+                descuento       NUMERIC(14,2) DEFAULT 0.00,
+                total           NUMERIC(14,2) DEFAULT 0.00,
+                costo_total     NUMERIC(14,2) DEFAULT 0.00,
+                utilidad        NUMERIC(14,2) DEFAULT 0.00,
+                margen          NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_ventas_periodo UNIQUE (punto_venta_id, turno_id, periodo_inicio, periodo_fin)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_pv ON datum_inter.ventas (punto_venta_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_turno ON datum_inter.ventas (turno_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_periodo ON datum_inter.ventas (periodo_inicio, periodo_fin)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_updated_at ON datum_inter.ventas;
+            CREATE TRIGGER trg_ventas_updated_at
+                BEFORE UPDATE ON datum_inter.ventas
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_platillo (
+                id                SERIAL PRIMARY KEY,
+                venta_id          INT           NOT NULL REFERENCES datum_inter.ventas(id) ON DELETE CASCADE,
+                platillo_id       INT           NOT NULL REFERENCES datum_inter.platillos(id),
+                tipo_producto_id  INT           REFERENCES datum_inter.tipos_producto(id),
+                cantidad          INT           NOT NULL,
+                total             NUMERIC(14,2) DEFAULT 0.00,
+                costo_total       NUMERIC(14,2) DEFAULT 0.00,
+                utilidad          NUMERIC(14,2) DEFAULT 0.00,
+                margen            NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_platillo_venta ON datum_inter.ventas_platillo (venta_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_platillo_platillo ON datum_inter.ventas_platillo (platillo_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_platillo_updated_at ON datum_inter.ventas_platillo;
+            CREATE TRIGGER trg_ventas_platillo_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_platillo
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_no_encontrados (
+                id                SERIAL PRIMARY KEY,
+                venta_id          INT           NOT NULL REFERENCES datum_inter.ventas(id) ON DELETE CASCADE,
+                producto_nombre   VARCHAR(150)  NOT NULL,
+                tipo_producto_id  INT           REFERENCES datum_inter.tipos_producto(id),
+                cantidad          INT           NOT NULL,
+                total             NUMERIC(14,2) DEFAULT 0.00,
+                costo_total       NUMERIC(14,2) DEFAULT 0.00,
+                utilidad          NUMERIC(14,2) DEFAULT 0.00,
+                margen            NUMERIC(8,4)  DEFAULT 0.0000,
+                created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_no_encontrados_venta ON datum_inter.ventas_no_encontrados (venta_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_no_encontrados_updated_at ON datum_inter.ventas_no_encontrados;
+            CREATE TRIGGER trg_ventas_no_encontrados_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_no_encontrados
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS datum_inter.ventas_descuentos (
+                id            SERIAL PRIMARY KEY,
+                venta_id      INT           NOT NULL REFERENCES datum_inter.ventas(id) ON DELETE CASCADE,
+                descuento_id  INT           NOT NULL REFERENCES datum_inter.descuentos(id),
+                monto         NUMERIC(14,2) DEFAULT 0.00,
+                created_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                updated_at    TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_descuentos_venta ON datum_inter.ventas_descuentos (venta_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ventas_descuentos_descuento ON datum_inter.ventas_descuentos (descuento_id)")
+        cursor.execute("""
+            DROP TRIGGER IF EXISTS trg_ventas_descuentos_updated_at ON datum_inter.ventas_descuentos;
+            CREATE TRIGGER trg_ventas_descuentos_updated_at
+                BEFORE UPDATE ON datum_inter.ventas_descuentos
+                FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at()
+        """)
+        crear_vista_resumen(cursor)
         
 
         print("Insertando turnos...")
@@ -289,7 +571,7 @@ def initialize_database():
             INSERT INTO datum_inter.turnos (nombre, hora_inicio, hora_fin) VALUES
                 ('Mañana', '07:00:00', '13:59:00'),
                 ('Tarde/Noche', '14:00:00', '03:00:00')
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (nombre) DO NOTHING
         """)
         
         print("Insertando puntos de venta...")
@@ -474,6 +756,9 @@ def initialize_database():
         print("   [CON DATOS]  → lineas, familias, unidades_medida, categorias_producto")
         print("                → puntos_venta, tipos_producto, descuentos, turnos")
         print("   [SIN DATOS]  → articulos, subrecetas, subreceta_componentes, platillos")
+        print("                → platillo_componentes, ventas_anuales, ventas_mensuales")
+        print("                → ventas_diarias, ventas, ventas_platillo")
+        print("                → ventas_no_encontrados, ventas_descuentos")
         print("\nREGISTROS INSERTADOS:")
         print(f"   - turnos: 2")
         print(f"   - puntos_venta: 7")
@@ -483,7 +768,7 @@ def initialize_database():
         print(f"   - categorias_producto: 85")
         print(f"   - tipos_producto: 23")
         print(f"   - descuentos: 9")
-        print("\nNOTA: Las tablas articulos, subrecetas, subreceta_componentes y platillos")
+        print("\nNOTA: Las tablas de articulos, recetas y ventas")
         print("         están creadas pero VACÍAS. Puedes insertar registros manualmente.")
         print("=" * 70)
         

@@ -1,0 +1,472 @@
+-- =============================================================
+-- datum_inter — Migración MySQL → PostgreSQL
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- Schema
+-- -------------------------------------------------------------
+CREATE SCHEMA IF NOT EXISTS datum_inter;
+SET search_path TO datum_inter;
+
+-- =============================================================
+-- TABLAS DE MIGRACIÓN DIRECTA
+-- (misma estructura, sintaxis Postgres)
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- lineas
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.lineas (
+    id      SERIAL PRIMARY KEY,
+    nombre  VARCHAR(100) NOT NULL,
+    status  SMALLINT     DEFAULT 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_lineas_nombre
+    ON datum_inter.lineas (nombre);
+
+
+-- -------------------------------------------------------------
+-- familias
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.familias (
+    id        SERIAL PRIMARY KEY,
+    nombre    VARCHAR(100) NOT NULL,
+    linea_id  INT          NOT NULL REFERENCES datum_inter.lineas(id)
+                           ON DELETE RESTRICT ON UPDATE CASCADE,
+    status    SMALLINT     DEFAULT 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_familias_nombre_linea
+    ON datum_inter.familias (nombre, linea_id);
+CREATE INDEX IF NOT EXISTS idx_familias_linea
+    ON datum_inter.familias (linea_id);
+
+
+-- -------------------------------------------------------------
+-- unidades_medida
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.unidades_medida (
+    id           SERIAL PRIMARY KEY,
+    clave        VARCHAR(10)    NOT NULL,
+    nombre       VARCHAR(50)    NOT NULL,
+    factor_base  NUMERIC(10,4)  DEFAULT 1.0000
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_unidades_clave
+    ON datum_inter.unidades_medida (clave);
+
+
+-- -------------------------------------------------------------
+-- articulos
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.articulos (
+    id               SERIAL PRIMARY KEY,
+    familia_id       INT           NOT NULL REFERENCES datum_inter.familias(id)
+                                   ON DELETE RESTRICT ON UPDATE CASCADE,
+    numero_articulo  INT           NOT NULL,
+    descripcion      TEXT,
+    ultimo_mov       DATE,
+    unidad_medida_id INT           NOT NULL REFERENCES datum_inter.unidades_medida(id)
+                                   ON DELETE RESTRICT ON UPDATE CASCADE,
+    costo_unitario   NUMERIC(10,2),
+    contenido        NUMERIC(10,4),
+    created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_articulos_numero
+    ON datum_inter.articulos (numero_articulo);
+CREATE INDEX IF NOT EXISTS idx_articulos_familia
+    ON datum_inter.articulos (familia_id);
+CREATE INDEX IF NOT EXISTS idx_articulos_unidad
+    ON datum_inter.articulos (unidad_medida_id);
+
+-- Trigger para actualizar updated_at automáticamente
+CREATE OR REPLACE FUNCTION datum_inter.fn_set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER trg_articulos_updated_at
+    BEFORE UPDATE ON datum_inter.articulos
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- -------------------------------------------------------------
+-- categorias_producto  (auto-referenciada)
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.categorias_producto (
+    id         SERIAL PRIMARY KEY,
+    nombre     VARCHAR(100) NOT NULL,
+    parent_id  INT          REFERENCES datum_inter.categorias_producto(id)
+                            ON DELETE RESTRICT ON UPDATE CASCADE,
+    status     SMALLINT     DEFAULT 1
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_categorias_nombre_parent
+    ON datum_inter.categorias_producto (nombre, parent_id);
+CREATE INDEX IF NOT EXISTS idx_categorias_parent
+    ON datum_inter.categorias_producto (parent_id);
+
+
+-- -------------------------------------------------------------
+-- puntos_venta
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.puntos_venta (
+    id         SERIAL PRIMARY KEY,
+    nombre     VARCHAR(100) NOT NULL,
+    status     SMALLINT     DEFAULT 1,
+    created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_puntos_venta_nombre
+    ON datum_inter.puntos_venta (nombre);
+
+CREATE TRIGGER trg_puntos_venta_updated_at
+    BEFORE UPDATE ON datum_inter.puntos_venta
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- -------------------------------------------------------------
+-- tipos_producto
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.tipos_producto (
+    id             SERIAL PRIMARY KEY,
+    nombre         VARCHAR(100) NOT NULL,
+    status         SMALLINT     DEFAULT 1,
+    punto_venta_id INT,          -- sin FK en origen, se respeta igual
+    created_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+    updated_at     TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tipos_producto_nombre
+    ON datum_inter.tipos_producto (nombre);
+
+CREATE TRIGGER trg_tipos_producto_updated_at
+    BEFORE UPDATE ON datum_inter.tipos_producto
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- -------------------------------------------------------------
+-- descuentos
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.descuentos (
+    id              SERIAL PRIMARY KEY,
+    nombre          VARCHAR(150) NOT NULL,
+    status          SMALLINT     DEFAULT 1,
+    punto_venta_id  INT          NOT NULL REFERENCES datum_inter.puntos_venta(id),
+    tipo_producto_id INT         NOT NULL REFERENCES datum_inter.tipos_producto(id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_descuentos_nombre
+    ON datum_inter.descuentos (nombre);
+CREATE INDEX IF NOT EXISTS idx_descuentos_pv
+    ON datum_inter.descuentos (punto_venta_id);
+CREATE INDEX IF NOT EXISTS idx_descuentos_tp
+    ON datum_inter.descuentos (tipo_producto_id);
+
+
+-- -------------------------------------------------------------
+-- turnos  (fijos: mañana / tarde)
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.turnos (
+    id          SERIAL PRIMARY KEY,
+    nombre      VARCHAR(50) NOT NULL,
+    hora_inicio TIME        NOT NULL,
+    hora_fin    TIME        NOT NULL,
+    created_at  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TRIGGER trg_turnos_updated_at
+    BEFORE UPDATE ON datum_inter.turnos
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+-- Datos base (turnos fijos)
+INSERT INTO datum_inter.turnos (nombre, hora_inicio, hora_fin) VALUES
+    ('Mañana', '07:00:00', '14:00:00'),
+    ('Tarde',  '14:00:00', '22:00:00')
+ON CONFLICT DO NOTHING;
+
+
+-- =============================================================
+-- SUBRECETAS
+-- (se mantiene relacional — base para calcular costos)
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS datum_inter.subrecetas (
+    id               SERIAL PRIMARY KEY,
+    nombre           VARCHAR(150)  NOT NULL,
+    rendimiento      NUMERIC(10,2),
+    unidad_medida_id INT           NOT NULL REFERENCES datum_inter.unidades_medida(id)
+                                   ON DELETE RESTRICT ON UPDATE CASCADE,
+    status           SMALLINT      DEFAULT 1,
+    created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_subrecetas_nombre
+    ON datum_inter.subrecetas (nombre);
+CREATE INDEX IF NOT EXISTS idx_subrecetas_unidad
+    ON datum_inter.subrecetas (unidad_medida_id);
+
+CREATE TRIGGER trg_subrecetas_updated_at
+    BEFORE UPDATE ON datum_inter.subrecetas
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+CREATE TABLE IF NOT EXISTS datum_inter.subreceta_componentes (
+    id                  SERIAL PRIMARY KEY,
+    subreceta_padre_id  INT           NOT NULL REFERENCES datum_inter.subrecetas(id)
+                                      ON DELETE CASCADE ON UPDATE CASCADE,
+    articulo_id         INT           REFERENCES datum_inter.articulos(id)
+                                      ON DELETE RESTRICT ON UPDATE CASCADE,
+    subreceta_id        INT           REFERENCES datum_inter.subrecetas(id)
+                                      ON DELETE RESTRICT ON UPDATE CASCADE,
+    cantidad            NUMERIC(10,3) NOT NULL,
+    costo_parcial       NUMERIC(10,2),
+    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_subreceta_componente CHECK (
+        (articulo_id IS NOT NULL AND subreceta_id IS NULL) OR
+        (articulo_id IS NULL     AND subreceta_id IS NOT NULL)
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_subreceta_componentes
+    ON datum_inter.subreceta_componentes (subreceta_padre_id, articulo_id, subreceta_id);
+CREATE INDEX IF NOT EXISTS idx_subreceta_comp_articulo
+    ON datum_inter.subreceta_componentes (articulo_id);
+CREATE INDEX IF NOT EXISTS idx_subreceta_comp_sub
+    ON datum_inter.subreceta_componentes (subreceta_id);
+
+CREATE TRIGGER trg_subreceta_componentes_updated_at
+    BEFORE UPDATE ON datum_inter.subreceta_componentes
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- =============================================================
+-- PLATILLOS  — ingredientes como JSON
+-- =============================================================
+-- Estructura del campo ingredientes (JSON):
+-- [
+--   {
+--     "tipo": "articulo" | "subreceta",
+--     "id": 12,
+--     "nombre": "Jitomate",
+--     "cantidad": 0.200,
+--     "unidad": "kg",
+--     "costo_unitario": 18.50,
+--     "costo_parcial": 3.70
+--   },
+--   ...
+-- ]
+-- costo_total_calculado = suma de todos los costo_parcial del array
+
+CREATE TABLE IF NOT EXISTS datum_inter.platillos (
+    id                    SERIAL PRIMARY KEY,
+    nombre                VARCHAR(150)  NOT NULL,
+    categoria_id          INT           NOT NULL REFERENCES datum_inter.categorias_producto(id)
+                                        ON DELETE RESTRICT ON UPDATE CASCADE,
+    costo_manual          NUMERIC(10,2),
+    ingredientes          JSON,          -- snapshot de componentes con costos
+    costo_calculado       NUMERIC(10,2), -- suma derivada del JSON, actualizable
+    status                SMALLINT      DEFAULT 1,
+    created_at            TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP     DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_platillos_nombre
+    ON datum_inter.platillos (nombre);
+CREATE INDEX IF NOT EXISTS idx_platillos_categoria
+    ON datum_inter.platillos (categoria_id);
+
+CREATE TRIGGER trg_platillos_updated_at
+    BEFORE UPDATE ON datum_inter.platillos
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- =============================================================
+-- VENTAS — jerarquía anual → mensual → diaria
+-- =============================================================
+
+-- -------------------------------------------------------------
+-- ventas_anuales
+-- Cabecera por punto de venta y año fiscal
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.ventas_anuales (
+    id              SERIAL PRIMARY KEY,
+    punto_venta_id  INT           NOT NULL REFERENCES datum_inter.puntos_venta(id)
+                                  ON DELETE RESTRICT ON UPDATE CASCADE,
+    anio            SMALLINT      NOT NULL,  -- ej. 2024, 2025
+    subtotal        NUMERIC(14,2) DEFAULT 0.00,
+    descuento       NUMERIC(14,2) DEFAULT 0.00,
+    total           NUMERIC(14,2) DEFAULT 0.00,
+    costo_total     NUMERIC(14,2) DEFAULT 0.00,
+    utilidad_bruta  NUMERIC(14,2) DEFAULT 0.00,
+    margen          NUMERIC(8,4)  DEFAULT 0.0000,
+    created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_venta_anual UNIQUE (punto_venta_id, anio)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ventas_anuales_pv
+    ON datum_inter.ventas_anuales (punto_venta_id);
+
+CREATE TRIGGER trg_ventas_anuales_updated_at
+    BEFORE UPDATE ON datum_inter.ventas_anuales
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- -------------------------------------------------------------
+-- ventas_mensuales
+-- Un registro por mes dentro de cada año
+-- -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datum_inter.ventas_mensuales (
+    id               SERIAL PRIMARY KEY,
+    venta_anual_id   INT           NOT NULL REFERENCES datum_inter.ventas_anuales(id)
+                                   ON DELETE CASCADE ON UPDATE CASCADE,
+    mes              SMALLINT      NOT NULL CHECK (mes BETWEEN 1 AND 12),
+    subtotal         NUMERIC(14,2) DEFAULT 0.00,
+    descuento        NUMERIC(14,2) DEFAULT 0.00,
+    total            NUMERIC(14,2) DEFAULT 0.00,
+    costo_total      NUMERIC(14,2) DEFAULT 0.00,
+    utilidad_bruta   NUMERIC(14,2) DEFAULT 0.00,
+    margen           NUMERIC(8,4)  DEFAULT 0.0000,
+    created_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_venta_mensual UNIQUE (venta_anual_id, mes)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ventas_mensuales_anual
+    ON datum_inter.ventas_mensuales (venta_anual_id);
+
+CREATE TRIGGER trg_ventas_mensuales_updated_at
+    BEFORE UPDATE ON datum_inter.ventas_mensuales
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- -------------------------------------------------------------
+-- ventas_diarias
+-- Un registro por día. El detalle completo va en JSON por turno.
+-- -------------------------------------------------------------
+-- Estructura de turno_manana / turno_tarde (JSON):
+-- {
+--   "turno_id": 1,
+--   "nombre": "Mañana",
+--   "subtotal": 3200.00,
+--   "descuento": 150.00,
+--   "total": 3050.00,
+--   "costo_total": 980.00,
+--   "utilidad": 2070.00,
+--   "margen": 67.87,
+--   "encontrados": [
+--     {
+--       "platillo_id": 5,
+--       "nombre": "Tacos de canasta",
+--       "tipo_producto_id": 2,
+--       "cantidad": 12,
+--       "precio_unitario": 25.00,
+--       "total": 300.00,
+--       "costo_unitario": 8.50,
+--       "costo_total": 102.00,
+--       "utilidad": 198.00,
+--       "margen": 66.00
+--     }
+--   ],
+--   "no_encontrados": [
+--     {
+--       "nombre": "Refresco especial",
+--       "tipo_producto_id": 3,
+--       "cantidad": 5,
+--       "total": 75.00
+--     }
+--   ],
+--   "descuentos": [
+--     {
+--       "descuento_id": 2,
+--       "nombre": "Descuento empleado",
+--       "monto": 150.00
+--     }
+--   ]
+-- }
+
+CREATE TABLE IF NOT EXISTS datum_inter.ventas_diarias (
+    id                  SERIAL PRIMARY KEY,
+    venta_mensual_id    INT           NOT NULL REFERENCES datum_inter.ventas_mensuales(id)
+                                      ON DELETE CASCADE ON UPDATE CASCADE,
+    dia                 SMALLINT      NOT NULL CHECK (dia BETWEEN 1 AND 31),
+    fecha               DATE          NOT NULL,  -- redundante pero útil para queries directas
+    turno_manana        JSON,          -- detalle completo turno mañana
+    turno_tarde         JSON,          -- detalle completo turno tarde
+    -- totales del día (suma de ambos turnos)
+    subtotal            NUMERIC(14,2) DEFAULT 0.00,
+    descuento           NUMERIC(14,2) DEFAULT 0.00,
+    total               NUMERIC(14,2) DEFAULT 0.00,
+    costo_total         NUMERIC(14,2) DEFAULT 0.00,
+    utilidad_bruta      NUMERIC(14,2) DEFAULT 0.00,
+    margen              NUMERIC(8,4)  DEFAULT 0.0000,
+    created_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_venta_diaria UNIQUE (venta_mensual_id, dia)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ventas_diarias_mensual
+    ON datum_inter.ventas_diarias (venta_mensual_id);
+CREATE INDEX IF NOT EXISTS idx_ventas_diarias_fecha
+    ON datum_inter.ventas_diarias (fecha);
+
+CREATE TRIGGER trg_ventas_diarias_updated_at
+    BEFORE UPDATE ON datum_inter.ventas_diarias
+    FOR EACH ROW EXECUTE FUNCTION datum_inter.fn_set_updated_at();
+
+
+-- =============================================================
+-- VISTA DE RESUMEN POR PUNTO DE VENTA
+-- (equivalente a v_resumen_punto_venta del esquema original)
+-- =============================================================
+CREATE OR REPLACE VIEW datum_inter.v_resumen_punto_venta AS
+WITH totales_globales AS (
+    SELECT
+        SUM(va.total)          AS gran_total_ventas,
+        SUM(va.costo_total)    AS gran_total_costos,
+        SUM(va.utilidad_bruta) AS gran_total_utilidad
+    FROM datum_inter.ventas_anuales va
+),
+detalle AS (
+    SELECT
+        pv.nombre              AS punto_venta,
+        SUM(va.total)          AS ventas,
+        SUM(va.costo_total)    AS costos,
+        SUM(va.utilidad_bruta) AS utilidad_bruta
+    FROM datum_inter.ventas_anuales va
+    JOIN datum_inter.puntos_venta pv ON pv.id = va.punto_venta_id
+    GROUP BY pv.nombre
+)
+SELECT
+    d.punto_venta                                                  AS punto_de_venta,
+    d.ventas,
+    ROUND((d.ventas        / NULLIF(t.gran_total_ventas,   0)) * 100, 2) AS pct_ventas,
+    d.costos,
+    ROUND((d.costos        / NULLIF(t.gran_total_costos,   0)) * 100, 2) AS pct_costos,
+    d.utilidad_bruta                                               AS ut_bruta,
+    ROUND((d.utilidad_bruta / NULLIF(t.gran_total_utilidad, 0)) * 100, 2) AS pct_ut_bruta,
+    ROUND((d.utilidad_bruta / NULLIF(d.ventas,              0)) * 100, 2) AS margen_pct
+FROM detalle d
+CROSS JOIN totales_globales t
+UNION ALL
+SELECT
+    'Total',
+    t.gran_total_ventas,
+    100.00,
+    t.gran_total_costos,
+    100.00,
+    t.gran_total_utilidad,
+    100.00,
+    ROUND((t.gran_total_utilidad / NULLIF(t.gran_total_ventas, 0)) * 100, 2)
+FROM totales_globales t;
